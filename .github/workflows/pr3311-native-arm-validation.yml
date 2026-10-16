@@ -1,0 +1,141 @@
+name: PR 3311 native ARM wheel validation
+'on':
+  push:
+    branches:
+    - bvolpato/pr3311-native-arm-validation
+permissions:
+  contents: read
+concurrency:
+  group: pr3311-native-arm-validation
+  cancel-in-progress: false
+jobs:
+  build:
+    name: ARM PyTorch ${{ matrix.torch-version }} CUDA ${{ matrix.cuda-version }}
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - torch-version: 2.8.0
+          cuda-version: 12.9.1
+        - torch-version: 2.11.0
+          cuda-version: 13.0.0
+    env:
+      MAX_JOBS: '1'
+      NVTE_FRAMEWORK: pytorch
+    steps:
+    - name: Check native ARM runner
+      shell: bash -euxo pipefail {0}
+      run: |
+        test "$(uname -m)" = aarch64
+        uname -a
+        df -h / /mnt
+        free -h
+    - name: Check runner disk layout
+      shell: bash -euxo pipefail {0}
+      id: disk-layout
+      run: |
+        if [[ "$(stat -c %d /)" != "$(stat -c %d /mnt)" ]]; then
+          echo "separate-temp-disk=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "separate-temp-disk=false" >> "$GITHUB_OUTPUT"
+        fi
+    - name: Move /var/lib/docker/
+      if: ${{ steps.disk-layout.outputs.separate-temp-disk == 'true' }}
+      shell: bash -euxo pipefail {0}
+      run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
+    - name: Maximize build space
+      if: ${{ steps.disk-layout.outputs.separate-temp-disk == 'true' }}
+      uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+      with:
+        root-reserve-mb: 5120
+        temp-reserve-mb: 32
+        swap-size-mb: 10240
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        build-mount-path: /var/lib/docker/
+    - name: Restore /var/lib/docker/
+      if: ${{ steps.disk-layout.outputs.separate-temp-disk == 'true' }}
+      shell: bash -euxo pipefail {0}
+      run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: 6ea2a74a9e98c99e6d7b164a33775cc457520027
+        submodules: recursive
+        repository: NVIDIA/TransformerEngine
+        persist-credentials: false
+    - name: Checkout build tools
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        path: build-tools
+        submodules: recursive
+        repository: bvolpato/TransformerEngine
+        ref: 592be1375d2d5dfb72590d108fa761ce332fec8e
+        persist-credentials: false
+    - name: Verify source and build scripts
+      shell: bash -euxo pipefail {0}
+      run: |
+        test "$(git rev-parse HEAD)" = 6ea2a74a9e98c99e6d7b164a33775cc457520027
+        test "$(git -C build-tools rev-parse HEAD)" = 592be1375d2d5dfb72590d108fa761ce332fec8e
+        git log -1 --oneline
+        git -C build-tools log -1 --oneline
+    - name: Build image
+      shell: bash -euxo pipefail {0}
+      env:
+        BASE_IMAGE: ''
+      run: |
+        if [[ "${BASE_IMAGE}" == "" ]]; then
+          docker build \
+            -t transformer-engine-build \
+            -f build-tools/.github/actions/build-pytorch-wheel/Dockerfile \
+            --build-arg PYTHON_VERSION=3.12 \
+            --build-arg TORCH_VERSION=${{ matrix.torch-version }} \
+            --build-arg CUDA_VERSION=${{ matrix.cuda-version }} \
+            --build-arg CUDNN_MAJOR_VERSION=9 \
+            --build-arg AARCH=sbsa \
+            .
+        else
+          docker pull ${BASE_IMAGE}
+          docker tag ${BASE_IMAGE} transformer-engine-build
+        fi
+    - name: Build wheel
+      shell: bash -euxo pipefail {0}
+      id: build_wheel
+      env:
+        AARCH: sbsa
+        CXX11_ABI: 'TRUE'
+        PYTHON_VERSION: '3.12'
+        RELEASE_VERSION: v2.20.2
+        SMOKE_TEST: 'true'
+      run: |
+        echo ::group::Build wheel
+
+        set +e
+        docker run \
+            --rm \
+            --shm-size=64g \
+            --workdir /workspace/transformer_engine/pytorch \
+            --volume "$(pwd):/workspace" \
+            --volume "$GITHUB_OUTPUT:$GITHUB_OUTPUT" \
+            -e AARCH="$AARCH" \
+            -e PIP_CONSTRAINT= \
+            -e CXX11_ABI="$CXX11_ABI" \
+            -e GITHUB_OUTPUT="$GITHUB_OUTPUT" \
+            -e MAX_JOBS \
+            -e NVTE_FRAMEWORK \
+            -e PYTHON_VERSION="$PYTHON_VERSION" \
+            -e RELEASE_VERSION="$RELEASE_VERSION" \
+            -e SMOKE_TEST="$SMOKE_TEST" \
+            transformer-engine-build bash /workspace/build-tools/.github/actions/build-pytorch-wheel/build.sh
+        exit_code=$?
+        set -e
+        echo ::endgroup::
+        exit "$exit_code"
+    - name: Log Built Wheels
+      shell: bash -euxo pipefail {0}
+      run: |
+        ls transformer_engine/pytorch/dist
