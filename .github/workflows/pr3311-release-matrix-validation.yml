@@ -1,0 +1,73 @@
+name: PR 3311 release matrix validation
+'on':
+  push:
+    branches:
+    - bvolpato/pr3311-release-matrix-validation
+permissions:
+  contents: read
+jobs:
+  build_wheels:
+    name: ${{ matrix.os }} ${{ matrix.release-version }} torch ${{ matrix.torch-version }} smoke=${{ matrix.smoke-test }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      # The release matrix from attach-wheels-to-release.yml for a tag that is not on PyPI (v2.21),
+      # plus one x86_64 CUDA 13 build for a tag that is on PyPI (v2.20.2).
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm]
+        release-version: [v2.21]
+        python-version: ['3.12']
+        torch-version: [2.8.0]
+        cuda-version: [12.9.1]
+        cudnn-version: ['9']
+        cxx11_abi: ['TRUE']
+        smoke-test: ['false']
+        include:
+        - os: ubuntu-22.04
+          release-version: v2.21
+          python-version: '3.12'
+          torch-version: 2.11.0
+          cuda-version: 13.0.0
+          cudnn-version: '9'
+          cxx11_abi: 'TRUE'
+          smoke-test: 'true'
+        - os: ubuntu-22.04-arm
+          release-version: v2.21
+          python-version: '3.12'
+          torch-version: 2.11.0
+          cuda-version: 13.0.0
+          cudnn-version: '9'
+          cxx11_abi: 'TRUE'
+          smoke-test: 'true'
+        - os: ubuntu-22.04
+          release-version: v2.20.2
+          python-version: '3.12'
+          torch-version: 2.11.0
+          cuda-version: 13.0.0
+          cudnn-version: '9'
+          cxx11_abi: 'TRUE'
+          smoke-test: 'true'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Build PyTorch Wheel
+      uses: ./.github/actions/build-pytorch-wheel
+      id: build-pytorch-wheel
+      with:
+        release-version: ${{ matrix.release-version }}
+        python-version: ${{ matrix.python-version }}
+        cuda-version: ${{ matrix.cuda-version }}
+        cudnn-version: ${{ matrix.cudnn-version }}
+        torch-version: ${{ matrix.torch-version }}
+        cxx11_abi: ${{ matrix.cxx11_abi }}
+        aarch: ${{ matrix.os == 'ubuntu-22.04' && 'x86_64' || 'sbsa' }}
+        smoke-test: ${{ matrix.smoke-test || 'false' }}
+      env:
+        NVTE_FRAMEWORK: pytorch
+        MAX_JOBS: 1
+    - name: Upload wheel
+      uses: actions/upload-artifact@v4
+      with:
+        name: wheel-${{ matrix.os }}-${{ matrix.release-version }}-torch${{ matrix.torch-version }}
+        path: transformer_engine/pytorch/dist/${{ steps.build-pytorch-wheel.outputs.wheel_name }}
+        if-no-files-found: error
